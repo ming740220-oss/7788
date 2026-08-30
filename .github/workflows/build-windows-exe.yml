@@ -1,0 +1,61 @@
+name: Build Roametry Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-windows-exe.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out build bundle
+        uses: actions/checkout@v4
+
+      - name: Extract Roametry source
+        shell: powershell
+        run: |
+          Expand-Archive -LiteralPath "Roametry-Windows-Builder-0.1.1.zip" -DestinationPath "build" -Force
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: build/Roametry/frontend/package-lock.json
+
+      - name: Build and verify Windows installer
+        working-directory: build/Roametry
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1
+
+      - name: Create installer checksum
+        working-directory: build/Roametry
+        shell: powershell
+        run: |
+          $Installer = Get-ChildItem "frontend\release\Roametry-0.1.1-x64-Setup.exe"
+          $Hash = (Get-FileHash -Algorithm SHA256 $Installer.FullName).Hash.ToLower()
+          "$Hash  $($Installer.Name)" | Set-Content -Encoding ascii "frontend\release\Roametry-0.1.1-x64-Setup-SHA256.txt"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Roametry-0.1.1-Windows-x64
+          path: |
+            build/Roametry/frontend/release/Roametry-0.1.1-x64-Setup.exe
+            build/Roametry/frontend/release/Roametry-0.1.1-x64-Setup-SHA256.txt
+          if-no-files-found: error
+          retention-days: 7
