@@ -24,6 +24,7 @@ jobs:
         shell: powershell
         run: |
           Expand-Archive -LiteralPath "Roametry-Windows-Builder-0.1.1.zip" -DestinationPath "build" -Force
+          Copy-Item -Path "patches\0.1.2\frontend\*" -Destination "build\Roametry\frontend" -Recurse -Force
 
       - name: Set up Python 3.13
         uses: actions/setup-python@v5
@@ -46,16 +47,16 @@ jobs:
         working-directory: build/Roametry
         shell: powershell
         run: |
-          $Installer = Get-ChildItem "frontend\release\Roametry-0.1.1-x64-Setup.exe"
+          $Installer = Get-ChildItem "frontend\release\Roametry-0.1.2-x64-Setup.exe"
           $Hash = (Get-FileHash -Algorithm SHA256 $Installer.FullName).Hash.ToLower()
-          "$Hash  $($Installer.Name)" | Set-Content -Encoding ascii "frontend\release\Roametry-0.1.1-x64-Setup-SHA256.txt"
+          "$Hash  $($Installer.Name)" | Set-Content -Encoding ascii "frontend\release\Roametry-0.1.2-x64-Setup-SHA256.txt"
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: Roametry-0.1.1-Windows-x64
+          name: Roametry-0.1.2-Windows-x64
           path: |
-            build/Roametry/frontend/release/Roametry-0.1.1-x64-Setup.exe
-            build/Roametry/frontend/release/Roametry-0.1.1-x64-Setup-SHA256.txt
+            build/Roametry/frontend/release/Roametry-0.1.2-x64-Setup.exe
+            build/Roametry/frontend/release/Roametry-0.1.2-x64-Setup-SHA256.txt
           if-no-files-found: error
           retention-days: 7
