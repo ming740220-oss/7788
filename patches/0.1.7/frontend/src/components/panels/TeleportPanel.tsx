@@ -1,0 +1,287 @@
+import { useEffect, useState } from 'react'
+import { Button, Group, SegmentedControl, Stack, Text } from '@mantine/core'
+import { clearLocation, goldDitto, pushHistory, setLocation } from '../../services/api'
+import type { LatLng, PanelProps } from './types'
+import { EMPTY_OVERLAY } from './types'
+import { formatPoint, haversineDistanceKm, parsePoint } from './coords'
+import { FavoriteButton } from './FavoriteButton'
+import { ContextMenu, type ContextMenuItem } from '../common/ContextMenu'
+import { ModeInfoTooltip } from '../common/ModeInfoTooltip'
+import { showToast } from '../common/Toast'
+import { useT } from '../../i18n'
+import { CoordinateField, ModePanelLayout, PanelFooter, PanelNotice, PanelSection, PanelStatus } from './ui'
+
+type Status = { kind: 'idle' } | { kind: 'busy' } | { kind: 'success'; message: string } | { kind: 'error'; message: string }
+
+export function TeleportPanel({ deviceId, device, deviceState, point, livePosition, requestPoint, clearPoint, setPoint, requestFlyTo, setOverlay, restoredAt, restoreAll }: PanelProps) {
+  const t = useT()
+  const [target, setTarget] = useState<LatLng | null>(point)
+  const [targetText, setTargetText] = useState(formatPoint(point))
+  const [status, setStatus] = useState<Status>({ kind: 'idle' })
+  const [teleportMode, setTeleportMode] = useState<'standard' | 'gold'>('standard')
+  const [contextMenu, setContextMenu] = useState<{
+    x: number
+    y: number
+    title?: string
+    items: ContextMenuItem[]
+  } | null>(null)
+
+  const deviceReady = device?.status === 'ready'
+  const isOtherModeActive = deviceState !== 'idle' && deviceState !== 'teleporting'
+  const canAct = deviceReady && target !== null && status.kind !== 'busy'
+  const distanceKm = target && livePosition ? haversineDistanceKm(livePosition, target) : null
+  const cooldownMinutes = distanceKm === null ? null : Math.min(120, Math.ceil(distanceKm))
+
+  useEffect(() => {
+    setTarget(point)
+    setTargetText(formatPoint(point))
+  }, [point])
+
+  useEffect(() => {
+    if (!restoredAt) return
+    setStatus({
+      kind: 'success',
+      message: target
+        ? t('teleport.status.clear_success_coordinate').replace('{coordinate}', formatPoint(target))
+        : t('teleport.status.clear_success'),
+    })
+  }, [restoredAt, t])
+
+  useEffect(() => {
+    setOverlay({
+      markers: [],
+      path: [],
+      onMapContextMenu: ({ lat, lng, clientX, clientY }) => {
+        const clickedPoint = { lat, lng }
+        setContextMenu({
+          x: clientX,
+          y: clientY,
+          title: `地圖位置 (${lat.toFixed(6)}, ${lng.toFixed(6)})`,
+          items: [
+            {
+              id: 'set-target',
+              label: t('contextmenu.set_target'),
+              onClick: () => {
+                setTarget(clickedPoint)
+                setTargetText(formatPoint(clickedPoint))
+                setPoint(clickedPoint)
+              },
+            },
+            {
+              id: 'teleport-here',
+              label: t('contextmenu.teleport_here'),
+              disabled: deviceState !== 'idle' || !deviceId,
+              onClick: async () => {
+                if (!deviceId) return
+                try {
+                  await setLocation(deviceId, lat, lng)
+                  pushHistory({ lat, lng, kind: 'teleport' }).catch(() => {})
+                  setPoint(clickedPoint)
+                  setTarget(clickedPoint)
+                  setTargetText(formatPoint(clickedPoint))
+                  requestFlyTo(lat, lng)
+                } catch (e) {
+                  setStatus({ kind: 'error', message: e instanceof Error ? e.message : t('teleport.status.set_failed') })
+                }
+              },
+            },
+            {
+              id: 'copy-map-coords',
+              label: t('contextmenu.copy_coords_short'),
+              onClick: () => {
+                navigator.clipboard.writeText(`${lat.toFixed(6)}, ${lng.toFixed(6)}`)
+                showToast(t('toast.copied_coords'))
+              },
+            },
+          ],
+        })
+      },
+    })
+    return () => setOverlay(EMPTY_OVERLAY)
+  }, [deviceId, deviceState, requestFlyTo, setOverlay, setPoint, t])
+
+  function handleTextChange(value: string) {
+    setStatus({ kind: 'idle' })
+    setTargetText(value)
+    setTarget(parsePoint(value))
+  }
+
+  function handleInputBlur() {
+    const parsed = parsePoint(targetText)
+    if (parsed) setPoint(parsed)
+    else if (targetText.trim() === '') setPoint(null)
+  }
+
+  function handleFocusInput() {
+    setStatus({ kind: 'idle' })
+    requestPoint((lat, lng) => {
+      const nextPoint = { lat, lng }
+      setTarget(nextPoint)
+      setTargetText(formatPoint(nextPoint))
+      setPoint(nextPoint)
+    })
+  }
+
+  function handlePasteClipboard() {
+    setStatus({ kind: 'idle' })
+    navigator.clipboard.readText().then((text) => {
+      if (!text) return
+      handleTextChange(text)
+      const parsed = parsePoint(text)
+      if (parsed) setPoint(parsed)
+    }).catch(() => {})
+  }
+
+  function handleUseCurrentLocation() {
+    if (!livePosition) return
+    setStatus({ kind: 'idle' })
+    setTarget(livePosition)
+    setTargetText(formatPoint(livePosition))
+    setPoint(livePosition)
+  }
+
+  function handlePreview() {
+    if (!target) return
+    requestFlyTo(target.lat, target.lng)
+  }
+
+  async function handleSet() {
+    if (!deviceId || !target) return
+    setStatus({ kind: 'busy' })
+    try {
+      await setLocation(deviceId, target.lat, target.lng)
+      pushHistory({ lat: target.lat, lng: target.lng, kind: 'teleport' }).catch(() => {})
+      setStatus({ kind: 'success', message: t('teleport.status.set_success') })
+      requestFlyTo(target.lat, target.lng)
+    } catch (e) {
+      setStatus({ kind: 'error', message: e instanceof Error ? e.message : t('teleport.status.set_failed') })
+    }
+  }
+
+  async function handleClear() {
+    if (!deviceId) return
+    setStatus({ kind: 'busy' })
+    try {
+      await clearLocation(deviceId)
+      // Restoring the real GPS should stop simulation, not erase the user's
+      // coordinate. Keeping it visible makes it possible to copy, favorite,
+      // preview, or reuse the last teleport point.
+      setStatus({
+        kind: 'success',
+        message: target
+          ? t('teleport.status.clear_success_coordinate').replace('{coordinate}', formatPoint(target))
+          : t('teleport.status.clear_success'),
+      })
+    } catch (e) {
+      setStatus({ kind: 'error', message: e instanceof Error ? e.message : t('teleport.status.clear_failed') })
+    }
+  }
+
+  async function handleClearAll() {
+    if (!restoreAll) return
+    setStatus({ kind: 'busy' })
+    const result = await restoreAll()
+    if (result.failed > 0) {
+      setStatus({ kind: 'error', message: t('teleport.status.clear_all_partial').replace('{count}', String(result.restored)).replace('{failed}', String(result.failed)) })
+      return
+    }
+    setStatus({ kind: 'success', message: t('teleport.status.clear_all_success').replace('{count}', String(result.restored)) })
+  }
+
+  async function handleGoldDitto() {
+    if (!deviceId || !target) return
+    setStatus({ kind: 'busy' })
+    try {
+      await goldDitto(deviceId, target.lat, target.lng)
+      setStatus({ kind: 'success', message: t('teleport.goldditto.status.success') })
+    } catch (e) {
+      setStatus({ kind: 'error', message: e instanceof Error ? e.message : t('teleport.goldditto.status.failed') })
+    }
+  }
+
+  return (
+    <div className="panel">
+      <ModePanelLayout
+        title={t('teleport.title')}
+        headerAction={<ModeInfoTooltip description={t('teleport.description')} />}
+        notices={<>
+          {!deviceId && <PanelNotice>{t('panel.hint.select_device')}</PanelNotice>}
+          {deviceId && !deviceReady && <PanelNotice tone="warning">{device?.detail ?? t('panel.hint.device_not_ready')}</PanelNotice>}
+          {isOtherModeActive && <PanelNotice tone="warning">{t('teleport.hint.navigating')}</PanelNotice>}
+        </>}
+        footer={
+          <PanelFooter justify="flex-end">
+            <Stack gap="xs" w="100%">
+              {teleportMode === 'standard' && (
+                <Group grow gap="xs">
+                  <Button
+                    color="red"
+                    variant="light"
+                    loading={status.kind === 'busy'}
+                    disabled={!deviceReady || status.kind === 'busy'}
+                    onClick={handleClear}
+                  >
+                    {t('teleport.action.clear')}
+                  </Button>
+                  {restoreAll && (
+                    <Button
+                      color="red"
+                      variant="light"
+                      loading={status.kind === 'busy'}
+                      disabled={status.kind === 'busy'}
+                      onClick={() => void handleClearAll()}
+                    >
+                      {t('teleport.action.clear_all')}
+                    </Button>
+                  )}
+                </Group>
+              )}
+              <Group grow gap="xs">
+                <Button variant="default" disabled={!target} onClick={handlePreview}>
+                  {t('teleport.action.preview')}
+                </Button>
+                <Button
+                  disabled={!canAct}
+                  loading={status.kind === 'busy'}
+                  onClick={teleportMode === 'gold' ? handleGoldDitto : handleSet}
+                >
+                  {teleportMode === 'gold' ? t('teleport.goldditto.action') : t('teleport.action.set_location')}
+                </Button>
+              </Group>
+            </Stack>
+          </PanelFooter>
+        }
+        status={status.kind === 'idle' ? undefined : <PanelStatus state={status.kind} message={status.kind === 'busy' ? t('generic.working') : status.message} />}
+      >
+        <PanelSection>
+          <SegmentedControl fullWidth size="xs" value={teleportMode} onChange={(value) => setTeleportMode(value as 'standard' | 'gold')} data={[{ value: 'standard', label: t('teleport.mode.standard') }, { value: 'gold', label: t('teleport.goldditto.title') }]} />
+          <CoordinateField
+            label={t('teleport.coordinate.label')}
+            placeholder="lat, lng or Google Maps URL"
+            value={targetText}
+            onFocus={handleFocusInput}
+            onChange={handleTextChange}
+            onBlur={handleInputBlur}
+            rightSection={<FavoriteButton point={target} />}
+          />
+          <Group gap="xs">
+            <Button size="compact-sm" variant="default" onClick={handlePasteClipboard}>{t('teleport.action.paste')}</Button>
+            {livePosition && <Button size="compact-sm" variant="default" onClick={handleUseCurrentLocation}>{t('teleport.action.my_location')}</Button>}
+          </Group>
+          {distanceKm !== null && <Text size="xs" c="dimmed">{t('teleport.distance')}: {distanceKm.toFixed(1)} km · {t('teleport.cooldown')}: ~{cooldownMinutes} min</Text>}
+        </PanelSection>
+        {teleportMode === 'gold' && <PanelSection description={t('teleport.goldditto.help')}><></></PanelSection>}
+      </ModePanelLayout>
+
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          title={contextMenu.title}
+          items={contextMenu.items}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+    </div>
+  )
+}
